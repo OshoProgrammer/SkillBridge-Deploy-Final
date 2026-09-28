@@ -18,3 +18,4 @@ View your app in AI Studio: https://ai.studio/apps/3daa2d40-eb7b-45ee-a1ef-85b20
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+# SkillBridge-Deploy-Final
