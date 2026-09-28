@@ -251,7 +251,7 @@ export const AuthLandingPage: React.FC = () => {
     switchUser(personaId);
   };
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
     if (!loginIdentifier.trim()) {
@@ -277,7 +277,7 @@ export const AuthLandingPage: React.FC = () => {
       return;
     }
 
-    const res = loginWithCredentials(loginIdentifier, loginRole, loginPassword, true);
+    const res = await loginWithCredentials(loginIdentifier, loginRole, loginPassword, true);
     if (!res.success && res.error) {
       setLoginError(res.error);
     }

@@ -1,3 +1,11 @@
+let authToken: string | null = null;
+export function setAuthToken(token: string | null) { authToken = token; }
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
+  return fetch(input, { ...init, headers });
+}
+
 /**
  * SkillBridge — API Service Client
  * Handles server communication, offline caching, and PWA synchronization.
@@ -5,7 +13,7 @@
 
 export async function fetchAppState() {
   try {
-    const res = await fetch('/api/state');
+    const res = await apiFetch('/api/state');
     if (!res.ok) throw new Error('Failed to fetch state');
     const data = await res.json();
     // Cache snapshot in localStorage for offline availability
@@ -22,12 +30,12 @@ export async function fetchAppState() {
 }
 
 export async function resetAppState() {
-  const res = await fetch('/api/reset-state', { method: 'POST' });
+  const res = await apiFetch('/api/reset-state', { method: 'POST' });
   return res.json();
 }
 
 export async function updateRoleCompetencies(roleId: string, requiredCompetencies: any[], actorName?: string) {
-  const res = await fetch(`/api/roles/${roleId}/competencies`, {
+  const res = await apiFetch(`/api/roles/${roleId}/competencies`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ requiredCompetencies, actorName }),
@@ -61,7 +69,7 @@ export async function submitAssessment(payload: {
     };
   }
 
-  const res = await fetch(`/api/employees/${payload.employeeId}/assessments/submit`, {
+  const res = await apiFetch(`/api/employees/${payload.employeeId}/assessments/submit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -70,7 +78,7 @@ export async function submitAssessment(payload: {
 }
 
 export async function completeCourse(employeeId: string, courseId: string) {
-  const res = await fetch(`/api/employees/${employeeId}/courses/${courseId}/complete`, {
+  const res = await apiFetch(`/api/employees/${employeeId}/courses/${courseId}/complete`, {
     method: 'POST',
   });
   return res.json();
@@ -83,7 +91,7 @@ export async function checkDuplicateKnowledge(payload: {
   departmentId?: string;
   description?: string;
 }) {
-  const res = await fetch('/api/knowledge/check-duplicate', {
+  const res = await apiFetch('/api/knowledge/check-duplicate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -97,7 +105,7 @@ export async function executeKnowledgeAction(payload: {
   newResource?: any;
   actorName?: string;
 }) {
-  const res = await fetch('/api/knowledge/action', {
+  const res = await apiFetch('/api/knowledge/action', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -111,7 +119,7 @@ export async function extractKnowledgeWithAI(payload: {
   documentType: string;
   competencyHint?: string;
 }) {
-  const res = await fetch('/api/ai/extract-knowledge', {
+  const res = await apiFetch('/api/ai/extract-knowledge', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -125,7 +133,7 @@ export async function advanceDraftPipeline(payload: {
   reviewNotes?: string;
   actorName?: string;
 }) {
-  const res = await fetch('/api/ai/drafts/pipeline-action', {
+  const res = await apiFetch('/api/ai/drafts/pipeline-action', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -139,7 +147,7 @@ export async function sendManagerNudge(payload: {
   actorName?: string;
   message?: string;
 }) {
-  const res = await fetch('/api/manager/nudge', {
+  const res = await apiFetch('/api/manager/nudge', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -151,7 +159,7 @@ export async function syncOfflineSubmissions() {
   const queue = JSON.parse(localStorage.getItem('skillbridge_offline_queue') || '[]');
   if (queue.length === 0) return { success: true, syncedCount: 0 };
 
-  const res = await fetch('/api/offline/sync', {
+  const res = await apiFetch('/api/offline/sync', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ submissions: queue }),
@@ -170,7 +178,7 @@ export async function explainLearningPathWithAI(payload: {
   requiredLevel: number;
 }) {
   try {
-    const res = await fetch('/api/ai/explain-path', {
+    const res = await apiFetch('/api/ai/explain-path', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -188,7 +196,7 @@ export async function loginOfficer(payload: {
   password?: string;
   role?: string;
 }) {
-  const res = await fetch('/api/auth/login', {
+  const res = await apiFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -205,7 +213,7 @@ export async function sendGmailOtp(payload: {
   employeeCode: string;
   password?: string;
 }) {
-  const res = await fetch('/api/auth/send-otp', {
+  const res = await apiFetch('/api/auth/send-otp', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -217,7 +225,7 @@ export async function verifyGmailOtp(payload: {
   email: string;
   otp: string;
 }) {
-  const res = await fetch('/api/auth/verify-otp', {
+  const res = await apiFetch('/api/auth/verify-otp', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -243,4 +251,3 @@ export async function configureSmtp(payload: {
   });
   return res.json();
 }
-

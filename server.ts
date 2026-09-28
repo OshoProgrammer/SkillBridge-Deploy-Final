@@ -1,4 +1,5 @@
-import express, { Request, Response } from "express";
+import express, { NextFunction, Request, Response } from "express";
+import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from "crypto";
 import path from "path";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
@@ -146,74 +147,123 @@ function getGeminiClient(): GoogleGenAI | null {
 }
 
 interface PendingRegistration {
-  otp: string;
+  otpHash: string;
   email: string;
   name: string;
   role: RoleType;
   departmentId: string;
   designation: string;
   employeeCode: string;
-  password?: string;
+  passwordHash: string;
   expiresAt: number;
   attempts: number;
 }
 
 const pendingRegistrations = new Map<string, PendingRegistration>();
+const OTP_TTL_MS = 10 * 60 * 1000;
+const MAX_OTP_ATTEMPTS = 5;
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const passwordHashes = new Map<string, string>();
+const sessions = new Map<string, { userId: string; expiresAt: number }>();
 
-// Runtime SMTP configuration store (allows setting up live Gmail delivery)
-let runtimeSmtpConfig: {
+function hashOtp(otp: string) { return createHash("sha256").update(otp).digest("hex"); }
+function hashPassword(password: string) {
+  const salt = randomBytes(16).toString("hex");
+  return `${salt}:${scryptSync(password, salt, 64).toString("hex")}`;
+}
+function verifyPassword(password: string, stored: string) {
+  const [salt, expected] = stored.split(":");
+  if (!salt || !expected) return false;
+  const actual = scryptSync(password, salt, 64).toString("hex");
+  return actual.length === expected.length && timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"));
+}
+function createSession(userId: string) {
+  const token = randomBytes(32).toString("base64url");
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  sessions.set(token, { userId, expiresAt });
+  return { token, expiresAt };
+}
+function requireAuthenticated(req: Request, res: Response, next: NextFunction) {
+  const token = req.get("authorization")?.match(/^Bearer (.+)$/)?.[1];
+  const session = token && sessions.get(token);
+  if (!session || session.expiresAt <= Date.now()) {
+    if (token) sessions.delete(token);
+    return res.status(401).json({ success: false, error: "Authentication is required." });
+  }
+  next();
+}
+for (const user of db.users) passwordHashes.set(user.id, hashPassword("demo1234"));
+
+// Runtime SMTP configuration is available for local/manual setup only. An
+// explicit SMTP_HOST environment value (for example Mailjet in production) is
+// authoritative and cannot be replaced by a request at runtime.
+type SmtpConfig = {
   host?: string;
   port?: number;
   user?: string;
   pass?: string;
-} | null = null;
+  secure?: boolean;
+  from?: string;
+};
+
+let runtimeSmtpConfig: SmtpConfig | null = null;
+
+function parseSmtpPort(value: string | number | undefined, fallback = 587) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function parseSmtpSecure(value: string | boolean | undefined) {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  return value.trim().toLowerCase() === "true";
+}
 
 function resolveSmtpConfig() {
-  const host = runtimeSmtpConfig?.host || process.env.SMTP_HOST || process.env.GMAIL_HOST || process.env.EMAIL_HOST || "smtp.gmail.com";
-  const port = Number(runtimeSmtpConfig?.port ?? process.env.SMTP_PORT ?? process.env.GMAIL_PORT ?? process.env.EMAIL_PORT ?? "587");
-  const user = runtimeSmtpConfig?.user || process.env.SMTP_USER || process.env.GMAIL_USER || process.env.EMAIL_USER || process.env.MAIL_USER;
-  const pass = runtimeSmtpConfig?.pass || process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD || process.env.EMAIL_PASSWORD || process.env.MAIL_PASSWORD;
-
-  return { host, port, user, pass };
+  const environmentIsAuthoritative = Boolean(process.env.SMTP_HOST);
+  const runtimeConfig = environmentIsAuthoritative ? null : runtimeSmtpConfig;
+  const host = process.env.SMTP_HOST ?? runtimeConfig?.host ?? process.env.GMAIL_HOST ?? process.env.EMAIL_HOST;
+  const port = parseSmtpPort(process.env.SMTP_PORT ?? runtimeConfig?.port ?? process.env.GMAIL_PORT ?? process.env.EMAIL_PORT);
+  const user = process.env.SMTP_USER ?? runtimeConfig?.user ?? process.env.GMAIL_USER ?? process.env.EMAIL_USER ?? process.env.MAIL_USER;
+  const pass = process.env.SMTP_PASS ?? runtimeConfig?.pass ?? process.env.GMAIL_APP_PASSWORD ?? process.env.GMAIL_PASSWORD ?? process.env.EMAIL_PASSWORD ?? process.env.MAIL_PASSWORD;
+  const secure = parseSmtpSecure(process.env.SMTP_SECURE) ?? runtimeConfig?.secure ?? port === 465;
+  const from = process.env.SMTP_FROM ?? runtimeConfig?.from;
+  return { host, port, user, pass, secure, from };
 }
 
 function createMailTransporter() {
-  const { host, port, user, pass } = resolveSmtpConfig();
+  const host = process.env.SMTP_HOST || "in-v3.mailjet.com";
+  const port = Number(process.env.SMTP_PORT || "587");
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
 
-  if (user && pass) {
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-    });
-
-    if (!runtimeSmtpConfig) {
-      runtimeSmtpConfig = { host, port, user, pass };
-    }
-
-    return transporter;
+  if (!user || !pass) {
+    console.error("[MAILJET] SMTP_USER or SMTP_PASS is missing");
+    return null;
   }
 
-  return null;
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: {
+      user,
+      pass,
+    },
+  });
 }
 
 async function sendOtpEmail(toEmail: string, otpCode: string, officerName: string) {
   const transporter = createMailTransporter();
-  console.log(`\n======================================================`);
-  console.log(`[GMAIL OTP DISPATCH SERVICE]`);
-  console.log(`To: ${toEmail} (${officerName})`);
-  console.log(`Generated 6-Digit OTP: [ ${otpCode} ]`);
-  console.log(`Timestamp: ${new Date().toISOString()}`);
-  console.log(`======================================================\n`);
 
   if (!transporter) {
-    console.log(`[GMAIL OTP SERVICE] No SMTP credentials configured. Returning OTP code to client sandbox.`);
-    return { sentViaSmtp: false, reason: "No SMTP credentials configured on server" };
+    console.warn("[OTP DELIVERY] SMTP is not configured; OTP was not issued.");
+    return { sentViaSmtp: false, reason: "SMTP host is missing or credentials are incomplete" };
   }
 
   try {
-    const fromUser = runtimeSmtpConfig?.user || process.env.SMTP_USER || process.env.GMAIL_USER || process.env.EMAIL_USER || process.env.MAIL_USER || 'no-reply@skillbridge.gov.in';
+    const smtpConfig = resolveSmtpConfig();
+    const fromUser = process.env.SMTP_FROM;
     const info = await transporter.sendMail({
       from: `"SkillBridge Civil Services Portal" <${fromUser}>`,
       to: toEmail,
@@ -243,10 +293,10 @@ async function sendOtpEmail(toEmail: string, otpCode: string, officerName: strin
         </div>
       `,
     });
-    console.log(`[GMAIL OTP SERVICE] Email dispatched successfully to ${toEmail}. Message ID:`, info.messageId);
+    console.log(`[SMTP OTP SERVICE] Email dispatched successfully to ${toEmail}. Message ID:`, info.messageId);
     return { sentViaSmtp: true, messageId: info.messageId };
   } catch (err: any) {
-    console.error(`[GMAIL OTP SERVICE] Error sending email via SMTP:`, err?.message || err);
+    console.error(`[SMTP OTP SERVICE] Error sending email via SMTP:`, err?.message || err);
     return { sentViaSmtp: false, error: err?.message };
   }
 }
@@ -285,7 +335,7 @@ async function startServer() {
   });
 
   // 2. Reset / Seed Demo State (for easy hero demo walkthrough)
-  app.post("/api/reset-state", (req: Request, res: Response) => {
+  app.post("/api/reset-state", requireAuthenticated, (req: Request, res: Response) => {
     db.organization = { ...INITIAL_ORGANIZATION };
     db.departments = [...INITIAL_DEPARTMENTS];
     db.competencies = [...INITIAL_COMPETENCIES];
@@ -347,16 +397,8 @@ async function startServer() {
       });
     }
 
-    // Password verification
-    if (password !== undefined) {
-      const validPasswords = ["demo1234", "Officer#2026", "State#2026", "Admin#2026", "Gov#2026", "Password#123"];
-      const isPasswordValid = validPasswords.includes(password) || password.length >= 6;
-      if (!isPasswordValid) {
-        return res.status(401).json({
-          success: false,
-          error: "Invalid security passkey. Please check your credentials.",
-        });
-      }
+    if (typeof password !== "string" || !verifyPassword(password, passwordHashes.get(user.id) || "")) {
+      return res.status(401).json({ success: false, error: "Invalid security passkey. Please check your credentials." });
     }
 
     const employee = db.employees.find((e) => e.id === user.employeeId || e.email.toLowerCase() === user.email.toLowerCase());
@@ -372,10 +414,13 @@ async function startServer() {
       organizationId: db.organization.id,
     });
 
+    const session = createSession(user.id);
     res.json({
       success: true,
       user,
       employee,
+      token: session.token,
+      expiresAt: new Date(session.expiresAt).toISOString(),
       message: `Identity verified for ${user.name}.`,
     });
   });
@@ -388,9 +433,6 @@ async function startServer() {
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    const smtpConfig = resolveSmtpConfig();
-    const hasLiveSmtp = !!(smtpConfig.user && smtpConfig.pass);
-
     // Check if an account already exists for this email
     const existing = db.users.find((u) => u.email.toLowerCase() === cleanEmail);
     if (existing) {
@@ -401,44 +443,39 @@ async function startServer() {
       });
     }
 
-    // Generate random 6-digit cryptographic OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-    pendingRegistrations.set(cleanEmail, {
-      otp,
+    if (typeof password !== "string" || password.length < 8) {
+      return res.status(400).json({ success: false, error: "Password must be at least 8 characters." });
+    }
+    const passwordHash = hashPassword(password);
+    const otp = randomInt(0, 1_000_000).toString().padStart(6, "0");
+    const registration: PendingRegistration = {
+      otpHash: hashOtp(otp),
       email: cleanEmail,
       name: name?.trim() || cleanEmail.split("@")[0].replace(".", " "),
       role: role || "learner",
       departmentId: departmentId || db.departments[0]?.id || "dept-it-gov",
       designation: designation?.trim() || "Civil Service Officer",
       employeeCode: employeeCode?.trim() || `SDGD-CADRE-${Math.floor(1000 + Math.random() * 9000)}`,
-      password: password || "demo1234",
-      expiresAt,
+      passwordHash,
+      expiresAt: 0,
       attempts: 0,
-    });
+    };
 
     // Send email via nodemailer / log to terminal
     const emailResult = await sendOtpEmail(cleanEmail, otp, name || "Officer");
 
-    if (!hasLiveSmtp && !emailResult.sentViaSmtp) {
-      console.warn("[SMTP CONFIG] No live Gmail SMTP credentials detected. Server is falling back to sandbox OTP output.");
+    if (!emailResult.sentViaSmtp) {
+      return res.status(503).json({ success: false, error: "Verification email delivery is unavailable. Configure SMTP and try again." });
     }
-
-    const isSmtpLive = !!(runtimeSmtpConfig?.user || process.env.SMTP_USER || process.env.GMAIL_USER || process.env.EMAIL_USER || process.env.MAIL_USER);
+    registration.expiresAt = Date.now() + OTP_TTL_MS;
+    pendingRegistrations.set(cleanEmail, registration);
 
     res.json({
       success: true,
-      deliveredToMailbox: emailResult.sentViaSmtp,
-      smtpConfigured: isSmtpLive,
-      message: emailResult.sentViaSmtp
-        ? `A 6-digit verification code has been dispatched directly to your Gmail (${email}). Please check your inbox and spam folder.`
-        : hasLiveSmtp
-          ? `SMTP credentials are present but delivery failed. Check the Gmail App Password and allow less secure sign-in restrictions or recent Google security changes.`
-          : `Email delivery simulation: No live SMTP gateway is connected yet. Your official verification code is displayed below.`,
+      deliveredToMailbox: true,
+      message: `A 6-digit verification code has been dispatched directly to your Gmail (${email}). Please check your inbox and spam folder.`,
       email: cleanEmail,
       expiresInSeconds: 600,
-      sandboxOtp: emailResult.sentViaSmtp ? undefined : otp,
     });
   });
 
@@ -446,49 +483,69 @@ async function startServer() {
   app.get("/api/auth/smtp-status", (req: Request, res: Response) => {
     const smtpConfig = resolveSmtpConfig();
     const currentUser = smtpConfig.user || null;
+    const hasCompleteCredentials = Boolean(smtpConfig.user) === Boolean(smtpConfig.pass);
     res.json({
-      configured: !!currentUser,
+      configured: Boolean(smtpConfig.host) && hasCompleteCredentials,
       host: smtpConfig.host,
+      port: smtpConfig.port,
+      secure: smtpConfig.secure,
       user: currentUser ? currentUser.replace(/(.{2})(.*)(@.*)/, "$1***$3") : null,
-      fullUser: currentUser,
-      source: runtimeSmtpConfig ? "runtime" : currentUser ? "environment" : "missing",
+      source: process.env.SMTP_HOST ? "environment" : runtimeSmtpConfig ? "runtime" : smtpConfig.host ? "environment" : "missing",
     });
   });
 
-  // E. Configure Live Gmail SMTP credentials at runtime
+  // E. Configure SMTP at runtime only when no SMTP_HOST environment setting is present.
   app.post("/api/auth/smtp-config", async (req: Request, res: Response) => {
-    const { user, pass, host = "smtp.gmail.com", port = 587 } = req.body;
-    if (!user || !pass) {
-      return res.status(400).json({ success: false, error: "Gmail address and Google App Password are required." });
+    if (process.env.SMTP_HOST) {
+      return res.status(409).json({
+        success: false,
+        error: "SMTP is configured from environment variables and cannot be overridden at runtime.",
+      });
     }
+    const { user, pass, host, port, secure, from } = req.body;
+    const existingSmtpConfig = resolveSmtpConfig();
+    const cleanHost = (typeof host === "string" ? host.trim() : "") || existingSmtpConfig.host || "";
+    const cleanUser = typeof user === "string" ? user.trim() : "";
+    const cleanPass = typeof pass === "string" ? pass.trim().replace(/\s+/g, "") : "";
+    if (!cleanHost) {
+      return res.status(400).json({ success: false, error: "SMTP host is required." });
+    }
+    if (Boolean(cleanUser) !== Boolean(cleanPass)) {
+      return res.status(400).json({ success: false, error: "Provide both SMTP username and password, or leave both empty for unauthenticated SMTP." });
+    }
+
+    const configuredPort = parseSmtpPort(port, existingSmtpConfig.port);
+    const configuredSecure = parseSmtpSecure(secure) ?? existingSmtpConfig.secure;
 
     try {
       const testTransporter = nodemailer.createTransport({
-        host,
-        port: Number(port),
-        secure: Number(port) === 465,
-        auth: { user: user.trim(), pass: pass.trim().replace(/\s+/g, "") },
+        host: cleanHost,
+        port: configuredPort,
+        secure: configuredSecure,
+        ...(cleanUser && cleanPass ? { auth: { user: cleanUser, pass: cleanPass } } : {}),
       });
 
       await testTransporter.verify();
 
       runtimeSmtpConfig = {
-        host,
-        port: Number(port),
-        user: user.trim(),
-        pass: pass.trim().replace(/\s+/g, ""),
+        host: cleanHost,
+        port: configuredPort,
+        user: cleanUser || undefined,
+        pass: cleanPass || undefined,
+        secure: configuredSecure,
+        from: typeof from === "string" && from.trim() ? from.trim() : undefined,
       };
 
-      console.log(`[SMTP CONFIG] Successfully verified and activated live Gmail SMTP for: ${user}`);
+      console.log(`[SMTP CONFIG] Successfully verified and activated SMTP host: ${cleanHost}`);
       return res.json({
         success: true,
-        message: `Gmail SMTP gateway successfully connected! Live verification emails will now be dispatched from ${user}.`,
+        message: "SMTP gateway successfully connected. Verification emails will now use this runtime configuration.",
       });
     } catch (err: any) {
-      console.error(`[SMTP CONFIG] Connection verification failed:`, err);
+      console.error(`[SMTP CONFIG] Connection verification failed:`, err?.message || err);
       return res.status(400).json({
         success: false,
-        error: `Failed to authenticate with Gmail SMTP: ${err.message || 'Check your Gmail App Password'}. Note: Use a 16-character Google App Password from myaccount.google.com/apppasswords.`,
+        error: "Failed to verify the SMTP connection. Check the host, port, TLS setting, and credentials.",
       });
     }
   });
@@ -519,12 +576,12 @@ async function startServer() {
       });
     }
 
-    // Compare with the generated OTP (or standard dev fallback 123456 if local SMTP is offline)
-    const isMatch = cleanOtp === record.otp || cleanOtp === "123456";
+    if (!/^\d{6}$/.test(cleanOtp)) return res.status(400).json({ success: false, error: "Verification code must contain exactly 6 digits." });
+    const isMatch = timingSafeEqual(Buffer.from(hashOtp(cleanOtp), "hex"), Buffer.from(record.otpHash, "hex"));
 
     if (!isMatch) {
       record.attempts += 1;
-      if (record.attempts >= 5) {
+      if (record.attempts >= MAX_OTP_ATTEMPTS) {
         pendingRegistrations.delete(cleanEmail);
         return res.status(400).json({
           success: false,
@@ -533,7 +590,7 @@ async function startServer() {
       }
       return res.status(400).json({
         success: false,
-        error: `Invalid verification code. ${5 - record.attempts} attempts remaining. Please check your Gmail.`,
+        error: `Invalid verification code. ${MAX_OTP_ATTEMPTS - record.attempts} attempts remaining. Please check your Gmail.`,
       });
     }
 
@@ -589,6 +646,7 @@ async function startServer() {
 
     db.users.push(newUser);
     db.employees.push(newEmployee);
+    passwordHashes.set(newUser.id, record.passwordHash);
     pendingRegistrations.delete(cleanEmail);
 
     // Audit log
@@ -603,14 +661,19 @@ async function startServer() {
       organizationId: db.organization.id,
     });
 
+    const session = createSession(newUser.id);
     res.json({
       success: true,
       message: `Gmail authenticated successfully! Account created for ${newUser.name}.`,
       user: newUser,
       employee: newEmployee,
       users: db.users,
+      token: session.token,
+      expiresAt: new Date(session.expiresAt).toISOString(),
     });
   });
+
+  app.use("/api", requireAuthenticated);
 
   // 3. Update Role Required Competencies (Step 1 in Hero Flow)
   app.put("/api/roles/:roleId/competencies", (req: Request, res: Response) => {

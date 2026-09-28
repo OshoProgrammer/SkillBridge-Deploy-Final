@@ -149,7 +149,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, initialTa
 
   const matchedUser = findUserByIdentifier(loginIdentifier);
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
     if (!loginIdentifier.trim()) {
@@ -175,7 +175,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, initialTa
       return;
     }
 
-    const res = loginWithCredentials(loginIdentifier, loginRole, loginPassword, true);
+    const res = await loginWithCredentials(loginIdentifier, loginRole, loginPassword, true);
     if (res.success) {
       onClose();
     } else if (res.error) {
