@@ -1,0 +1,6 @@
+{
+  "name": "SkillBridge",
+  "description": "Organizational competency-intelligence platform with LMS capabilities for SIH26075 — measuring real competency gaps, targeted learning paths, knowledge reuse, and verified workforce readiness.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
