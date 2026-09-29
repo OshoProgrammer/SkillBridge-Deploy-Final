@@ -27,8 +27,10 @@ import {
   sendGmailOtp,
   verifyGmailOtp,
   loginOfficer,
+  loginAsDemoPersona as loginAsDemoPersonaRequest,
   setAuthToken,
 } from '../services/api';
+import { isDemoPersonaId } from '../data/demoPersonas';
 
 export type NetworkStatus = 'ONLINE' | 'OFFLINE' | 'SYNCING' | 'SYNCED';
 
@@ -75,10 +77,14 @@ interface AppContextType {
 
   // Active Persona & Session
   isAuthenticated: boolean;
+  /** True when the active session was started via a predefined Demo Persona (no credentials/OTP). */
+  isDemoSession: boolean;
   currentUser: User;
   currentEmployee: Employee | null;
   activeRole: RoleType;
   switchUser: (userId: string) => void;
+  /** Starts a credential-free sandbox session for a predefined Demo Persona only. */
+  loginAsDemoPersona: (personaId: string) => Promise<{ success: boolean; error?: string }>;
   switchRole: (role: RoleType) => void;
   logout: () => void;
   loginWithCredentials: (
@@ -266,6 +272,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Active User / Persona Session (First page starts unauthenticated so user sees login/register/demo personas)
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isDemoSession, setIsDemoSession] = useState<boolean>(false);
   const [currentUser, setCurrentUser] = useState<User>({
     id: 'user-learner',
     name: 'Ananya Sharma',
@@ -447,19 +454,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     loadData();
   }, []);
 
-  const finalizeUserLogin = (user: User, token: string, expiresAt: string, role?: RoleType) => {
+  const finalizeUserLogin = (user: User, token: string, expiresAt: string, role?: RoleType, isDemo: boolean = false) => {
     setCurrentUser(user);
     setActiveRole(role || user.role);
     setIsAuthenticated(true);
+    setIsDemoSession(isDemo);
     setIsSessionLocked(false);
     setSessionSecurity({
       encrypted: true,
-      protocol: 'TLS 1.3 • AES-256-GCM (GovNet Apex)',
+      protocol: isDemo ? 'Demo Sandbox • Isolated Persona Session' : 'TLS 1.3 • AES-256-GCM (GovNet Apex)',
       token,
       expiresAt,
       clearanceLevel: user.securityClearance || 'LEVEL 3 — SECRET / RESTRICTED',
       verifiedGovNetId: user.civilServiceId || user.employeeId || 'SDGD-CADRE-101',
-      isMfaVerified: true,
+      isMfaVerified: !isDemo,
       ipAddress: '10.42.19.88 (NIC Secure Gateway)',
     });
 
@@ -468,23 +476,63 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       timestamp: new Date().toISOString(),
       actorName: user.name,
       actorRole: user.role,
-      action: 'SECURITY_AUTH_MFA_SUCCESS',
+      action: isDemo ? 'DEMO_PERSONA_SESSION_STARTED' : 'SECURITY_AUTH_MFA_SUCCESS',
       entityType: 'competency',
-      details: `Officer ${user.name} (${user.civilServiceId || user.email}) authenticated via a server-issued session.`,
+      details: isDemo
+        ? `Demo persona ${user.name} (${user.civilServiceId || user.id}) entered the isolated demo sandbox without credentials.`
+        : `Officer ${user.name} (${user.civilServiceId || user.email}) authenticated via a server-issued session.`,
       organizationId: organization?.id || 'org-state-gov',
     };
     setAuditLogs((prev) => [secLog, ...prev]);
 
     addToast({
       type: 'success',
-      title: 'GovNet Session Authenticated',
-      message: `Identity verified: ${user.name} (${user.securityClearance || 'Level 3 Clearance'})`,
+      title: isDemo ? 'Demo Persona Activated' : 'GovNet Session Authenticated',
+      message: isDemo
+        ? `Signed in as ${user.name} — isolated demo session (no credentials required).`
+        : `Identity verified: ${user.name} (${user.securityClearance || 'Level 3 Clearance'})`,
     });
+  };
+
+  /**
+   * Demo Persona exception: starts a credential-free sandbox session for the
+   * predefined demo personas ONLY. No email, password, OTP or officer ID is
+   * requested. Real / newly registered accounts are rejected here and must use
+   * the normal `loginWithCredentials` or `requestGmailOtp` + `confirmGmailOtp`.
+   */
+  const loginAsDemoPersona = async (personaId: string): Promise<{ success: boolean; error?: string }> => {
+    if (!isDemoPersonaId(personaId)) {
+      return { success: false, error: 'Not a predefined Demo Persona. Credentials are required.' };
+    }
+
+    try {
+      const response = await loginAsDemoPersonaRequest(personaId);
+      if (!response.success || !response.user || !response.token || !response.expiresAt) {
+        addToast({
+          type: 'error',
+          title: 'Demo Session Failed',
+          message: response.error || 'Could not start the demo session. Please retry.',
+        });
+        return { success: false, error: response.error || 'Could not start the demo session.' };
+      }
+      setAuthToken(response.token);
+      setFailedLoginAttempts(0);
+      finalizeUserLogin(response.user, response.token, response.expiresAt, response.user.role, true);
+      return { success: true };
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Connection Error',
+        message: 'Could not reach the demo session gateway. Please retry.',
+      });
+      return { success: false, error: 'Network connection failed.' };
+    }
   };
 
   const logout = () => {
     setAuthToken(null);
     setIsAuthenticated(false);
+    setIsDemoSession(false);
     setMfaPendingUser(null);
     setIsSessionLocked(false);
     addToast({
@@ -495,6 +543,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const switchUser = (userId: string) => {
+    // Demo Personas are the credential-free exception to the auth flow.
+    if (isDemoPersonaId(userId)) {
+      void loginAsDemoPersona(userId);
+      return;
+    }
     addToast({ type: 'warning', title: 'Authentication Required', message: 'Sign in with that officer’s credentials to change accounts.' });
   };
 
@@ -839,10 +892,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         mentorshipRequests,
 
         isAuthenticated,
+        isDemoSession,
         currentUser,
         currentEmployee,
         activeRole,
         switchUser,
+        loginAsDemoPersona,
         switchRole,
         logout,
         loginWithCredentials,

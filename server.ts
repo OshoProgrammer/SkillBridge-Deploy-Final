@@ -28,6 +28,7 @@ import {
   generatePersonalizedLearningPath,
   scoreToLevel,
 } from "./src/lib/scoring";
+import { isDemoPersonaId } from "./src/data/demoPersonas";
 import {
   ScoringWeights,
   CompetencyBadge,
@@ -422,6 +423,55 @@ async function startServer() {
       token: session.token,
       expiresAt: new Date(session.expiresAt).toISOString(),
       message: `Identity verified for ${user.name}.`,
+    });
+  });
+
+  // A2. Demo Persona Session (credential-free exception)
+  // The 1-click Demo Personas must bypass the normal authentication flow:
+  // no email, password, Gmail OTP or officer ID is required. Only the
+  // predefined, seeded demo personas (see src/data/demoPersonas.ts) can use
+  // this endpoint. Every real / newly registered account is rejected here and
+  // must continue through /api/auth/login + /api/auth/send-otp +
+  // /api/auth/verify-otp exactly as before.
+  app.post("/api/auth/demo-login", (req: Request, res: Response) => {
+    const { personaId } = req.body;
+
+    if (typeof personaId !== "string" || !isDemoPersonaId(personaId)) {
+      return res.status(403).json({
+        success: false,
+        error: "Demo access is restricted to predefined demo personas. Real accounts must sign in with credentials.",
+      });
+    }
+
+    const user = db.users.find((u) => u.id === personaId.trim().toLowerCase());
+    if (!user) {
+      return res.status(404).json({ success: false, error: "Demo persona is not available." });
+    }
+
+    const employee = db.employees.find(
+      (e) => e.id === user.employeeId || e.email.toLowerCase() === user.email.toLowerCase()
+    );
+
+    db.auditLogs.unshift({
+      id: `log-demo-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actorName: user.name,
+      actorRole: user.role,
+      action: "DEMO_PERSONA_SESSION_STARTED",
+      entityType: "role",
+      details: `Demo persona ${user.name} (${user.civilServiceId || user.id}) launched a credential-free demo session.`,
+      organizationId: db.organization.id,
+    });
+
+    const session = createSession(user.id);
+    res.json({
+      success: true,
+      isDemo: true,
+      user,
+      employee,
+      token: session.token,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      message: `Demo session started for ${user.name}.`,
     });
   });
 

@@ -204,6 +204,20 @@ export async function loginOfficer(payload: {
   return res.json();
 }
 
+/**
+ * Demo Persona session: starts a credential-free sandbox session for the
+ * predefined demo personas only. Password / Gmail OTP are never requested.
+ * Real officers must keep using `loginOfficer` + `sendGmailOtp`/`verifyGmailOtp`.
+ */
+export async function loginAsDemoPersona(personaId: string) {
+  const res = await apiFetch('/api/auth/demo-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ personaId }),
+  });
+  return res.json();
+}
+
 export async function sendGmailOtp(payload: {
   email: string;
   name: string;

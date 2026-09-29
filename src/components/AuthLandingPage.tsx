@@ -44,7 +44,7 @@ export const AuthLandingPage: React.FC = () => {
     loginWithCredentials, 
     requestGmailOtp,
     confirmGmailOtp,
-    switchUser, 
+    loginAsDemoPersona,
     addToast,
     isRateLimited,
     rateLimitCountdown,
@@ -247,8 +247,9 @@ export const AuthLandingPage: React.FC = () => {
     },
   ];
 
-  const handlePersonaSelect = (personaId: string) => {
-    switchUser(personaId);
+  const handlePersonaSelect = async (personaId: string) => {
+    // Demo Personas bypass credentials/OTP and enter the demo experience directly.
+    await loginAsDemoPersona(personaId);
   };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -517,7 +518,9 @@ export const AuthLandingPage: React.FC = () => {
                       key={persona.id}
                       whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
-                      onClick={() => handlePersonaSelect(persona.id)}
+                      onClick={() => {
+                        void handlePersonaSelect(persona.id);
+                      }}
                       className={`p-5 rounded-2xl border cursor-pointer transition-all flex flex-col justify-between relative overflow-hidden group backdrop-blur-xl ${
                         isAnanya
                           ? 'bg-slate-900/90 border-orange-500/60 shadow-xl shadow-orange-950/30 ring-1 ring-orange-500/40'
@@ -584,7 +587,7 @@ export const AuthLandingPage: React.FC = () => {
                           {persona.department}
                         </span>
                         <div className="flex items-center gap-1 text-xs font-bold text-orange-400 group-hover:translate-x-1 transition-transform">
-                          <span>Sign In Session</span>
+                          <span>Enter Demo Session</span>
                           <ArrowRight className="w-3.5 h-3.5" />
                         </div>
                       </div>
